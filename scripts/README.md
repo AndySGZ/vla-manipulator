@@ -35,3 +35,26 @@ model repository; it never deletes the local checkpoint automatically.
 
 Large datasets, model weights, logs and checkpoints are intentionally excluded
 from Git.
+
+## Completed comparison and diagnosis scripts
+
+The 2026-10-18 state-input comparison used
+`train_pi05_so101_lora_state.sh` through `run_state_25k_autodl.sh`, then
+`eval_state_25k_replan5_max600.sh`. This is a separate experiment, not a
+continuation of the old state-free checkpoint. The evaluation helper now lives
+in `simulation/mj_env/scripts/eval_no_ping.py` rather than a temporary server
+path. See `docs/so101_state_input_experiment_2026-10-18.md` for the actual
+result and limitations.
+
+The 2026-10-19 old-checkpoint diagnosis used
+`diagnose_pi05_old25k_autodl.sh`. It serves the **old** 25k checkpoint with
+`pi05_so101_lora` (`discrete_state_input=False`) and runs eight fixed cases.
+The per-episode metrics come from `simulation/mj_env/scripts/diagnose_openpi.py`.
+Supply a fresh `RUN_ID` on every run: the launcher refuses to overwrite an
+existing status or result file. The dataset and motor adapter roundtrip checks
+are `openpi_ext/check_so101_roundtrip.py` and
+`simulation/mj_env/scripts/check_adapter_roundtrip.py`. See
+`docs/so101_old25k_diagnosis_2026-10-19.md` for what was actually verified.
+
+Raw diagnostic JSONL and evaluation logs stay outside Git; they were downloaded
+and hash-checked in the user's local `SO101_25k_诊断记录` folder.
