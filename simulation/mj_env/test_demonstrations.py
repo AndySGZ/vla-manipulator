@@ -49,6 +49,18 @@ class DemonstrationRecorderTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-uniform demonstration timing"):
             recorder.on_frame(np.ones(6), _observation(), {"simulation_time_s": 1.08})
 
+    def test_wrist_roll_excess_uses_native_radians(self):
+        recorder = SynchronizedEpisodeRecorder(_Dataset(), _Adapter(), 20, "pick")
+        for index, angle in enumerate((0.0, 1.0, 0.0)):
+            observation = _observation()
+            observation["observation.state"][4] = angle
+            recorder.on_frame(
+                np.ones(6), observation, {"simulation_time_s": index / 20}
+            )
+        self.assertAlmostEqual(
+            recorder.wrist_roll_excess_degrees, np.rad2deg(2.0), places=4
+        )
+
     def test_schema_has_two_cameras_and_six_coordinates(self):
         features = lerobot_features(480, 640, use_videos=True)
         self.assertEqual(features["image"]["shape"], (480, 640, 3))

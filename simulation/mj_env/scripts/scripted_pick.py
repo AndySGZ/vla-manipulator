@@ -68,6 +68,10 @@ _PLANAR_SEED = (-0.6, 1.1, 0.7)
 _ROLL_OFFSET = -0.212
 #: Position error above which an IK solution is treated as a miss.
 _POSITION_TOLERANCE = 0.003
+# A near-object waypoint must not ask the wrist to make a large turn while
+# descending onto, or lifting, a grasped object.  Such IK branch changes can
+# still satisfy the Cartesian pose and even pass the final lift success test.
+_MAX_GRASP_ROLL_CHANGE = np.deg2rad(60.0)
 
 # Small, reproducible perturbations around the retracted HOME_QPOS.  The arm
 # perturbation is deliberately bounded so it starts above the table and the
@@ -152,6 +156,13 @@ class PickTuning:
 
 def grasp_axis_yaw(env: SO101TabletopEnv, name: str) -> float:
     """Heading of the object's long axis, which the jaw hinge must match."""
+    # A sphere has no observable grasp axis.  Its sampled MuJoCo yaw is
+    # arbitrary; choose a jaw heading near the *current* wrist roll instead
+    # of training the wrist to follow an invisible random angle.
+    if objects.BY_NAME[name].shape == "sphere":
+        wrist_roll = float(env.data.qpos[env._qpos_ids[4]])
+        psi = _wrap(_ROLL_OFFSET - wrist_roll)
+        return -np.pi / 2.0 - psi
     body_id = env._objects[name].body_id
     rotation = env.data.xmat[body_id].reshape(3, 3)
     local_x = rotation[:, 0]
@@ -208,6 +219,19 @@ class GraspSolver:
         mujoco.mj_kinematics(self._model, self._scratch)
         return self._scratch.site_xmat[self._site_id].reshape(3, 3).copy()
 
+    def solve_continuous_height(
+        self, start: np.ndarray, end: np.ndarray, psi: float, grasp: np.ndarray
+    ) -> np.ndarray | None:
+        """Follow a vertical TCP path from the grasp pose without an IK jump."""
+        previous = grasp
+        for fraction in np.linspace(1.0 / 10.0, 1.0, 10):
+            point = start + fraction * (end - start)
+            solution = solve_top_down(self.arm, point, psi, previous)
+            if solution is None or abs(solution[4] - previous[4]) > np.deg2rad(25.0):
+                return None
+            previous = solution
+        return previous
+
     def solve_aperture(
         self, aim: np.ndarray, psi: float, offset: np.ndarray, q0: np.ndarray
     ) -> np.ndarray | None:
@@ -263,14 +287,25 @@ class GraspSolver:
                 "lift": grasp_tcp + (0.0, 0.0, tuning.lift_height),
             }
             solutions = {"grasp": grasp}
-            seed = grasp
             for label in ("reach", "hover", "lift"):
-                solution = solve_top_down(self.arm, above[label], psi, seed)
-                if solution is None:
-                    break
-                solutions[label] = seed = solution
+                # Seed *each* waypoint from the constrained grasp pose.  In
+                # particular, seeding lift from hover can put the wrist on a
+                # different IK branch and produce a ~270-degree turn during
+                # both descent and lift despite the same requested jaw yaw.
+                solution = solve_top_down(self.arm, above[label], psi, grasp)
+                if solution is None or abs(solution[4] - grasp[4]) > _MAX_GRASP_ROLL_CHANGE:
+                    solution = self.solve_continuous_height(
+                        grasp_tcp, above[label], psi, grasp
+                    )
+                    if solution is None:
+                        break
+                solutions[label] = solution
             else:
-                return solutions
+                if all(
+                    abs(solutions[label][4] - grasp[4]) <= _MAX_GRASP_ROLL_CHANGE
+                    for label in ("hover", "reach", "lift")
+                ):
+                    return solutions
         return None
 
 
@@ -323,10 +358,33 @@ def run_episode(
     width = env._objects[target].grip_width
     aim = np.asarray(info["target_position"], dtype=float) + (0.0, 0.0, tuning.grasp_rise)
     offset = solver.calibration.offset_for(width + 2.0 * PAD_CLEARANCE)
-    try:
-        solutions = solver.solve_waypoints(aim, grasp_axis_yaw(env, target), offset, tuning)
-    except (ValueError, FloatingPointError):
-        solutions = None
+    heading = grasp_axis_yaw(env, target)
+    # A ball admits any jaw heading.  Search around the current wrist pose and
+    # choose the feasible path with the least wrist travel, rather than using
+    # the ball's invisible sampled yaw or a single arbitrary fixed heading.
+    offsets = (
+        np.linspace(-np.pi / 2.0, np.pi / 2.0, 9)
+        if objects.BY_NAME[target].shape == "sphere" else (0.0,)
+    )
+    solutions = None
+    best_wrist_travel = float("inf")
+    for angle_offset in offsets:
+        try:
+            candidate = solver.solve_waypoints(
+                aim, heading + float(angle_offset), offset, tuning
+            )
+        except (ValueError, FloatingPointError):
+            continue
+        if candidate is None:
+            continue
+        wrist_path = np.array([
+            initial_q[4], candidate["hover"][4], candidate["reach"][4],
+            candidate["grasp"][4], candidate["lift"][4],
+        ])
+        wrist_travel = float(np.abs(np.diff(wrist_path)).sum())
+        if wrist_travel < best_wrist_travel:
+            solutions = candidate
+            best_wrist_travel = wrist_travel
     if solutions is None:
         return {
             "target": target,

@@ -24,6 +24,12 @@ from mj_env.env import SO101TabletopEnv
 from mj_env.scripts.scripted_pick import GraspSolver, PickTuning, run_episode
 
 
+# Excludes the clear alternate-IK-branch mode found in the first 320-episode
+# collection: ordinary excess wrist travel was <5 degrees; affected episodes
+# exceeded 375 degrees.  Keep a generous margin for future task variation.
+MAX_WRIST_ROLL_EXCESS_DEGREES = 90.0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     group = parser.add_mutually_exclusive_group(required=True)
@@ -107,14 +113,20 @@ def main() -> int:
                 )
                 attempted += 1
                 target_attempted += 1
+                wrist_roll_excess = recorder.wrist_roll_excess_degrees
+                save = bool(
+                    result["success"]
+                    and wrist_roll_excess <= MAX_WRIST_ROLL_EXCESS_DEGREES
+                )
                 record = {
                     **result,
                     "seed": seed,
                     "frames": recorder.frame_index,
                     "fps": fps,
-                    "saved": bool(result["success"]),
+                    "wrist_roll_excess_degrees": wrist_roll_excess,
+                    "saved": save,
                 }
-                if result["success"]:
+                if save:
                     dataset.save_episode(metadata=record)
                     saved += 1
                     target_saved += 1
@@ -125,6 +137,7 @@ def main() -> int:
                 print(
                     f"{target} seed={seed} outcome={result['outcome']} "
                     f"frames={recorder.frame_index} saved={record['saved']} "
+                    f"wrist_roll_excess_deg={wrist_roll_excess:.1f} "
                     f"target_saved={target_saved}"
                 )
             print(f"{target}: saved {target_saved}/{target_attempted} attempts", flush=True)

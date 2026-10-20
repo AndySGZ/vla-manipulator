@@ -106,6 +106,7 @@ class SynchronizedEpisodeRecorder:
     fps: int
     task: str
     timestamp_tolerance_s: float = 1e-5
+    _wrist_roll_radians: list[float] = field(default_factory=list, init=False)
 
     def __post_init__(self) -> None:
         if self.fps <= 0:
@@ -161,7 +162,17 @@ class SynchronizedEpisodeRecorder:
                 "timestamp": expected_time_s,
             }
         )
+        self._wrist_roll_radians.append(float(state[4]))
         self.frame_index += 1
+
+    @property
+    def wrist_roll_excess_degrees(self) -> float:
+        """Unnecessary wrist travel: total rotation minus start-to-end rotation."""
+        if len(self._wrist_roll_radians) < 2:
+            return 0.0
+        wrist = np.asarray(self._wrist_roll_radians, dtype=np.float64)
+        excess = np.abs(np.diff(wrist)).sum() - abs(wrist[-1] - wrist[0])
+        return float(np.rad2deg(max(excess, 0.0)))
 
     @staticmethod
     def _vector(value: np.ndarray, name: str) -> np.ndarray:
