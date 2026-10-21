@@ -157,12 +157,28 @@ class PickTuning:
     steps_hold: int = 10
 
 
+def is_sphere(env: SO101TabletopEnv, name: str) -> bool:
+    """Whether a body is a ball, judged from its geoms rather than its name.
+
+    The catalogue calls them ``sphere_blue`` and friends, but composed scenes
+    name their props ``object`` or ``cover``, so a name lookup in
+    :data:`mj_env.objects.BY_NAME` raises for every level scene.
+    """
+    body_id = env._objects[name].body_id
+    geoms = [
+        g for g in range(env.model.ngeom) if env.model.geom_bodyid[g] == body_id
+    ]
+    return bool(geoms) and all(
+        env.model.geom_type[g] == mujoco.mjtGeom.mjGEOM_SPHERE for g in geoms
+    )
+
+
 def grasp_axis_yaw(env: SO101TabletopEnv, name: str) -> float:
     """Heading of the object's long axis, which the jaw hinge must match."""
     # A sphere has no observable grasp axis.  Its sampled MuJoCo yaw is
     # arbitrary; choose a jaw heading near the *current* wrist roll instead
     # of training the wrist to follow an invisible random angle.
-    if objects.BY_NAME[name].shape == "sphere":
+    if is_sphere(env, name):
         wrist_roll = float(env.data.qpos[env._qpos_ids[4]])
         psi = _wrap(_ROLL_OFFSET - wrist_roll)
         return -np.pi / 2.0 - psi
@@ -383,7 +399,7 @@ def run_episode(
     # the ball's invisible sampled yaw or a single arbitrary fixed heading.
     offsets = (
         np.linspace(-np.pi / 2.0, np.pi / 2.0, 9)
-        if objects.BY_NAME[target].shape == "sphere" else (0.0,)
+        if is_sphere(env, target) else (0.0,)
     )
     solutions = None
     best_wrist_travel = float("inf")
