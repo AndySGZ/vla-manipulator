@@ -207,7 +207,6 @@ def _pad_poses(model: mujoco.MjModel) -> tuple[tuple, tuple]:
     site_x = data.site_xmat[site_id].reshape(3, 3)[:, 0]
     approach = site_x - site_x.dot(normal) * normal
     approach /= np.linalg.norm(approach)
-    lateral = np.cross(normal, approach)
 
     poses = []
     for body_name, geom_name, point, inward in (
@@ -215,6 +214,12 @@ def _pad_poses(model: mujoco.MjModel) -> tuple[tuple, tuple]:
         ("moving_jaw_so101_v1", MOVING_PAD_GEOM, p_moving, -normal),
     ):
         body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+        # The third column is the plate's normal, so the lateral axis must come
+        # from it: the two plates face each other, and taking a shared lateral
+        # axis instead would make the moving plate a *reflection* of the fixed
+        # one.  mju_mat2Quat then returns a rotation about 90 degrees away, and
+        # the jaw grips on the plate's edge instead of its face.
+        lateral = np.cross(inward, approach)
         rotation = np.stack([approach, lateral, inward], axis=1)
         centre = point - inward * (PAD_THICKNESS / 2.0)
         body_rotation = data.xmat[body_id].reshape(3, 3)
