@@ -232,6 +232,22 @@ class GraspSolver:
             previous = solution
         return previous
 
+    def aperture_centre(self, q: np.ndarray, offset: np.ndarray) -> np.ndarray:
+        """World position of the jaw aperture centre for a joint vector.
+
+        The aperture is where the *object* is, so this -- not the TCP site -- is
+        what a carry has to verify.  The IK's soft-axis fallback can hold the
+        TCP exactly while rotating the wrist, which slides the aperture
+        sideways; checking the TCP would not notice.
+        """
+        self._scratch.qpos[:] = self._model.qpos0
+        self._scratch.qpos[self._arm_qpos] = q
+        mujoco.mj_kinematics(self._model, self._scratch)
+        rotation = self._scratch.site_xmat[self._site_id].reshape(3, 3)
+        return (
+            self._scratch.site_xpos[self._site_id] + rotation @ offset
+        ).copy()
+
     def solve_aperture(
         self, aim: np.ndarray, psi: float, offset: np.ndarray, q0: np.ndarray
     ) -> np.ndarray | None:
