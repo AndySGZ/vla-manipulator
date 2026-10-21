@@ -46,6 +46,7 @@ from .scripted_pick import (
     JAW_CLEARANCE,
     JAW_SQUEEZE,
     PAD_CLEARANCE,
+    _MAX_GRASP_ROLL_CHANGE,
     _POSITION_TOLERANCE,
     GraspSolver,
     PickTuning,
@@ -143,13 +144,26 @@ def solve_pick_place(
             "lift": grasp_tcp + (0.0, 0.0, tuning.lift_height),
         }
         solutions: dict[str, np.ndarray] = {"grasp": grasp, "psi": np.array([psi])}
-        seed = grasp
         for label in ("reach", "hover", "lift"):
-            solution = solve_top_down(arm, above[label], psi, seed)
-            if solution is None:
-                break
-            solutions[label] = seed = solution
+            # Seed every waypoint from the constrained grasp pose.  Chaining
+            # them (reach -> hover -> lift) lets the wrist land on a different
+            # IK branch at each step, which is what made one level sweep the
+            # joint 843 degrees -- two and a half turns -- while every
+            # waypoint still solved.
+            solution = solve_top_down(arm, above[label], psi, grasp)
+            if solution is None or abs(solution[4] - grasp[4]) > _MAX_GRASP_ROLL_CHANGE:
+                solution = solver.solve_continuous_height(
+                    grasp_tcp, above[label], psi, grasp
+                )
+                if solution is None:
+                    break
+            solutions[label] = solution
         else:
+            if not all(
+                abs(solutions[label][4] - grasp[4]) <= _MAX_GRASP_ROLL_CHANGE
+                for label in ("hover", "reach", "lift")
+            ):
+                continue
             place_descend = solver.solve_aperture(place_aim, psi, offset, solutions["lift"])
             if place_descend is None:
                 continue
@@ -235,6 +249,35 @@ def solve_exact_top_down(
     return None
 
 
+#: Largest wrist-roll change one carry step may ask for.  The jaw is symmetric,
+#: so every pose has two equally valid IK solutions, and ``solve_top_down``
+#: falls back to ``auto_soft_axis`` -- which drops the orientation term -- when
+#: ``soft_orientation`` cannot hold the pose.  Consecutive steps then land on
+#: opposite branches.  A straight carry swings the site by 20-50 degrees on this
+#: arm, so 90 leaves the path room while refusing the ~180 degree flip that
+#: produces whole turns: one level swept the wrist 843 degrees -- two and a half
+#: turns -- and repeatedly pinned it against the joint limit.
+ROLL_STEP_LIMIT = math.radians(120.0)
+
+
+def _mode_candidates(
+    arm: SO101Arm, target: np.ndarray, psi: float, q0: np.ndarray
+) -> list[np.ndarray]:
+    """Every IK solution for the pose, not just the first mode that works."""
+    pose = SE3(*target) * SE3.Ry(np.pi) * SE3.Rz(psi)
+    limits = arm.joint_limits
+    epsilon = 1e-8
+    seed = np.clip(
+        np.asarray(q0, dtype=float), limits[:, 0] + epsilon, limits[:, 1] - epsilon
+    )
+    candidates = []
+    for mode in ("soft_orientation", "auto_soft_axis"):
+        result = arm.inverse_pose(pose, q0=seed, mode=mode, return_result=True)
+        if result.success and result.position_error_norm < _POSITION_TOLERANCE:
+            candidates.append(np.asarray(result.q, dtype=float))
+    return candidates
+
+
 def solve_aperture_point(
     solver: GraspSolver,
     point: np.ndarray,
@@ -243,6 +286,8 @@ def solve_aperture_point(
     q0: np.ndarray | None,
     *,
     tol: float = 0.002,
+    roll_ref: float | None = None,
+    roll_limit: float = ROLL_STEP_LIMIT,
 ) -> np.ndarray | None:
     """Joints that put the *aperture centre* on ``point``, or ``None``.
 
@@ -251,19 +296,32 @@ def solve_aperture_point(
     has to land on the requested point.  An unnoticed centimetre of aperture
     offset *is* "the cube lands 5 cm off the disc".
 
-    Deliberately *not* gated on the tool rotation.  Measured on this arm, a
-    straight-line aperture path swings the site rotation by 20-50 degrees even
-    though every solve succeeds: the IK balances position against orientation,
-    so there is no orientation continuity to enforce.  Gating on it rejected
-    every carry.
+    ``roll_ref`` turns on wrist continuity: the solve takes the IK branch whose
+    wrist roll stays closest to that value and refuses anything more than
+    ``roll_limit`` away, so a carry cannot flip branches between steps.  Without
+    it the same call is the plain position-only solve, which is what the
+    approach uses before there is a wrist pose worth staying near.
     """
     requested = np.asarray(point, dtype=float)
     target = requested.copy()
     solution = q0
     for _ in range(8):
-        candidate = solve_top_down(solver.arm, target, psi, solution)
-        if candidate is None:
+        candidates = _mode_candidates(solver.arm, target, psi, solution)
+        if not candidates:
             return None
+        if roll_ref is None:
+            candidate = candidates[0]
+        else:
+            # Prefer the branch that keeps the wrist near where the carry
+            # started.  Anything past the limit is still taken if it is the
+            # only option -- a failed carry loses the whole episode -- but the
+            # preference is strong enough that the joint stops wandering.
+            within = [
+                c for c in candidates if abs(float(c[4]) - roll_ref) <= roll_limit
+            ]
+            if not within:
+                return None
+            candidate = min(within, key=lambda c: abs(float(c[4]) - roll_ref))
         solution = candidate
         achieved = solver.aperture_centre(solution, offset)
         # Move the TCP command by however far the aperture missed; adding the
@@ -311,6 +369,10 @@ def cartesian_transport(
 
     seed = q0
     last: np.ndarray | None = None
+    # The wrist reference is the pose the carry starts from and does not move:
+    # updating it every step would let a slow drift walk the joint all the way
+    # round while every individual step still looked continuous.
+    roll_ref = None if seed is None else float(seed[4])
     for point in points:
         solution = solve_aperture_point(
             solver,
@@ -318,6 +380,7 @@ def cartesian_transport(
             psi,
             offset,
             seed,
+            roll_ref=roll_ref,
         )
         if solution is None:
             return False, last
@@ -730,3 +793,5 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
