@@ -25,6 +25,11 @@ import numpy as np
 
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 SCENE_XML = ASSETS_DIR / "scene.xml"
+#: Scene-composed task levels.  Each one includes ``../base_table.xml`` (the
+#: shared table, lights and cameras) plus the robot, and declares only the
+#: props that level adds.  Kept out of ``assets/`` so the legacy single-file
+#: scene stays exactly as it was.
+SCENES_DIR = ASSETS_DIR / "scenes"
 
 # --- Frame convention -------------------------------------------------------
 # Robot base at the origin, +x forward across the table, +z up, tabletop at z=0.
@@ -115,9 +120,14 @@ def _collision_geom(spec: mujoco.MjSpec, body: str, mesh: str) -> mujoco.MjsGeom
     raise ValueError(f"body {body!r} has no collision geom for mesh {mesh!r}")
 
 
-def build_spec() -> mujoco.MjSpec:
-    """Parse the scene and apply the amendments the MJCF cannot express."""
-    spec = mujoco.MjSpec.from_file(str(SCENE_XML))
+def build_spec(scene_xml: str | Path | None = None) -> mujoco.MjSpec:
+    """Parse a scene and apply the amendments the MJCF cannot express.
+
+    ``scene_xml`` defaults to the legacy eight-object tabletop.  Passing a file
+    from :data:`SCENES_DIR` composes the shared table with that level's props.
+    """
+    source = SCENE_XML if scene_xml is None else Path(scene_xml)
+    spec = mujoco.MjSpec.from_file(str(source))
 
     camera = spec.body("gripper").add_camera(name=WRIST_CAMERA)
     camera.pos = list(WRIST_CAMERA_POS)
@@ -139,9 +149,9 @@ def build_spec() -> mujoco.MjSpec:
     return spec
 
 
-def build_model() -> mujoco.MjModel:
-    """Compile the tabletop scene into an ``MjModel``."""
-    model = build_spec().compile()
+def build_model(scene_xml: str | Path | None = None) -> mujoco.MjModel:
+    """Compile a tabletop scene into an ``MjModel``."""
+    model = build_spec(scene_xml).compile()
     camera_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, SCENE_CAMERA)
     model.cam_pos[camera_id] = GLOBAL_CAMERA_POS
     model.cam_quat[camera_id] = look_at_quat(
