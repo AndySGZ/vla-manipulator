@@ -30,8 +30,11 @@ CAMERA_AZIMUTH = 135.0
 CAMERA_ELEVATION = -34.0
 CAMERA_DISTANCE = 0.72
 
-#: Layouts tried before giving up on showing this level solved.
-SEEDS = (0, 1, 2, 3)
+#: Layouts tried before giving up.  The experts solve roughly two layouts in
+#: three, so a level is retried until one succeeds; a level that cannot be
+#: solved in this many layouts produces no file at all rather than a clip of
+#: the harness failing.
+SEEDS = (0, 1, 2, 3, 4, 5, 6, 7)
 
 
 def _font(size: int):
@@ -89,11 +92,13 @@ def record_level(
 
         result = expert(env, solver, seed=seed, instruction=instruction,
                         on_frame=on_frame)
-        if result["success"] or seed == SEEDS[-1]:
+        if result["success"]:
             break
 
     env.close()
-    if not frames:
+    if not result["success"] or not frames:
+        # Never ship a clip of the expert failing: the point of the file is
+        # that this level can be solved, and a red banner proves it cannot.
         return result
 
     banner = frames[-1].copy()
@@ -122,6 +127,8 @@ def main() -> int:
     failures = 0
     for task_id in args.tasks:
         path = args.out / f"{task_id}.gif"
+        if path.exists():
+            path.unlink()  # never leave a stale clip next to a failed retry
         result = record_level(path, task_id, panel=args.panel, fps=args.fps)
         size = path.stat().st_size / 1e6 if path.exists() else 0.0
         print(f"{task_id:22s} {result['outcome']:10s} {size:5.1f} MB", flush=True)
