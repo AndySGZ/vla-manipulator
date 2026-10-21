@@ -1,4 +1,4 @@
-﻿"""Compile the SO101 tabletop MuJoCo model.
+"""Compile the SO101 tabletop MuJoCo model.
 
 ``assets/scene.xml`` is a plain, viewer-openable MJCF that includes the
 calibrated robot from the ``so101`` package.  Three things this environment
@@ -110,6 +110,9 @@ _FINGER_PRIORITY = 1
 PAD_THICKNESS = 0.0015
 PAD_DEPTH = 0.018
 PAD_WIDTH = 0.016
+#: Contact stiffness of the plates.  Softer than this and the object sinks in;
+#: stiffer and the plate kicks the object and the arm instead of holding them.
+PAD_SOLREF = 0.008
 #: Jaw angle the plates are designed at: the middle of the widths the catalogue
 #: actually uses (16-40 mm), which keeps them near-parallel across that range.
 _PAD_DESIGN_ANGLE = 0.17
@@ -230,8 +233,8 @@ def _add_gripper_pads(spec: mujoco.MjSpec) -> None:
         geom.name = geom_name
         geom.type = mujoco.mjtGeom.mjGEOM_BOX
         geom.size = [PAD_DEPTH / 2.0, PAD_WIDTH / 2.0, PAD_THICKNESS / 2.0]
-        geom.pos = pos.tolist()
-        geom.quat = quat.tolist()
+        geom.pos = np.asarray(pos).tolist()
+        geom.quat = np.asarray(quat).tolist()
         geom.group = 3
         geom.contype = 1
         geom.conaffinity = 1
@@ -240,9 +243,11 @@ def _add_gripper_pads(spec: mujoco.MjSpec) -> None:
         geom.priority = _FINGER_PRIORITY
         # Plate-on-object contact: a flat pad has no line-contact give, so it
         # needs to be stiffer than MuJoCo's default to stop the object sinking
-        # into it.  The old advice about soft pads applied to the curved prong,
-        # whose line contact needed the give to avoid spitting the object out.
-        geom.solref = [0.004, 1.0]
+        # into it.  Too stiff and the plate stops being a pad at all: at
+        # solref 0.004 the impact kicks the object and the arm aside, and one
+        # layout in five fails to close around the cube.  0.008 is the point
+        # where the object still cannot sink in but the pad still gives.
+        geom.solref = [PAD_SOLREF, 1.0]
         geom.solimp = [0.95, 0.99, 0.001, 0.5, 2.0]
 
 
